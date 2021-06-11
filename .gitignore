@@ -1,0 +1,10 @@
+**/__pycache__/
+*.pth
+confusion_matrix_shape_and_pose.ods
+dataset
+graphs/
+models/
+pose_only/
+process_sils/
+raw_data
+synth_test/
