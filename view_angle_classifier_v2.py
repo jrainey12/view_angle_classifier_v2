@@ -1,4 +1,5 @@
 import torch                  
+import torchvision
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, models, transforms
@@ -15,7 +16,8 @@ from PIL import Image
 from progress.bar import Bar
 import sklearn.metrics
 from loadDataset_sil_pose import Dataset as loadDataset
-
+from torch.utils.tensorboard import SummaryWriter
+import matplotlib.pyplot as plt
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,7 +63,8 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
     mean,std = [0.14054182],[0.3442364]#128k dataset
 
     if mode == 'train':
-		
+	
+        writer = SummaryWriter('runs/occluded_1')
 		
         print ("Mean :", mean)
         print ("Std :", std)
@@ -88,7 +91,7 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
         optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, 
                 weight_decay=0.0005)
 		
-        vis = Visualizations()
+        #vis = Visualizations()
 		
         early_stopping = EarlyStopping(5)
         total_time_ms = 0.0
@@ -114,9 +117,18 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
                     param_group['lr'] = learning_rate
 			
 			
-            t_loss, t_acc = train(model, optimizer, train_dataloader, epoch+1, batch_size, use_gpu, vis)		
-            vis.plot_loss(np.mean(t_loss), "train", epoch+1)
-            vis.plot_acc(np.mean(t_acc), "train", epoch+1)
+            t_loss, t_acc = train(model, optimizer, train_dataloader, epoch+1, batch_size, use_gpu)#, writer)#,vis)		
+            
+            writer.add_scalar('training loss',
+                            np.mean(t_loss),
+                            epoch)
+
+            writer.add_scalar('training acc',
+                    np.mean(t_acc),
+                    epoch)
+
+            #vis.plot_loss(np.mean(t_loss), "train", epoch+1)
+            #vis.plot_acc(np.mean(t_acc), "train", epoch+1)
 
             if (epoch+1) > 0 and (epoch+1) % 5 == 0:
 				
@@ -131,10 +143,19 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
 
             _LOGGER.info("Performing Validation... ")
 			
-            v_loss, v_acc = validate(model, val_dataloader, batch_size, epoch+1, use_gpu, vis,early_stopping, optimizer)
+            v_loss, v_acc = validate(model, val_dataloader, batch_size, epoch+1, use_gpu,early_stopping, optimizer)#vis)
 	    
-            vis.plot_loss(np.mean(v_loss), "val", epoch+1)
-            vis.plot_acc(np.mean(v_acc), "val", epoch+1)
+            writer.add_scalar('val loss',
+                            np.mean(v_loss),
+                            epoch)
+            writer.add_scalar('val acc',
+                    np.mean(v_acc),
+                    epoch)
+
+
+
+            #vis.plot_loss(np.mean(v_loss), "val", epoch+1)
+            #vis.plot_acc(np.mean(v_acc), "val", epoch+1)
 
 
             if early_stopping.early_stop:
@@ -181,9 +202,29 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
         model.load_state_dict(torch.load("model.pth")['state_dict'])
         test_dataloader = load_data(test_data, batch_size, mean, std)
 				
-        vis = Visualizations()
+        #vis = Visualizations()
 		
-        test(model, test_dataloader, batch_size, use_gpu, vis)
+        
+        writer = SummaryWriter('runs/occluded_1')
+
+        #get some random images
+        dataiter = iter(test_dataloader)
+        images,labels = dataiter.next()
+
+        #create grid of images
+        img_grid = torchvision.utils.make_grid(images)
+
+        #show images
+        matplotlib_imshow(img_grid, one_channel=True)
+        
+        writer.add_image('test_images', img_grid)
+        
+        #show net graph
+        net = Net()
+        writer.add_graph(net, images)
+        writer.close()
+
+        test(model, test_dataloader, batch_size, use_gpu)
 		
     elif mode == 'resume':
 		
@@ -340,7 +381,7 @@ def calc_acc(y_pred, y, total):
     return acc, n_correct
 
 
-def train(model, optimizer, dataloader, epoch, batch_size, use_gpu,vis):
+def train(model, optimizer, dataloader, epoch, batch_size, use_gpu,):#vis):
     """
     Perform the training of the network.
     Return: loss_vals, acc_vals.
@@ -356,7 +397,7 @@ def train(model, optimizer, dataloader, epoch, batch_size, use_gpu,vis):
     loss_fn = torch.nn.CrossEntropyLoss()
     #loss_fn = torch.nn.BCEWithLogitsLoss()
 	
-    with Bar('Training', max=len(dataloader), suffix ='%(index)d/%(max)d - %(eta)ds\r') as bar:
+    with Bar('  Training', max=len(dataloader), suffix ='%(index)d/%(max)d - %(eta)ds\r') as bar:
 
         for i,data in enumerate(dataloader):
 		
@@ -424,7 +465,7 @@ def train(model, optimizer, dataloader, epoch, batch_size, use_gpu,vis):
 
     return loss_values, acc_values
 
-def validate(model, dataloader, batch_size, epoch,use_gpu, vis, early_stopping, optimizer):
+def validate(model, dataloader, batch_size, epoch,use_gpu, early_stopping, optimizer):
     """
     Perform validation tests on the model.
     Return: loss_vals, acc_vals
@@ -441,7 +482,7 @@ def validate(model, dataloader, batch_size, epoch,use_gpu, vis, early_stopping, 
 
     #confusion_matrix = torch.zeros(11,11)
 
-    with Bar('Validation Testing:', max=len(dataloader), suffix ='%(index)d/%(max)d - %(eta)ds\r') as bar, torch.no_grad():
+    with Bar('  Validation Testing:', max=len(dataloader), suffix ='%(index)d/%(max)d - %(eta)ds\r') as bar, torch.no_grad():
         for i,data in enumerate(dataloader):
 		
             iteration = i + 1
@@ -507,7 +548,7 @@ def validate(model, dataloader, batch_size, epoch,use_gpu, vis, early_stopping, 
 
     return loss_values,acc_values
 	  
-def test(model, dataloader, batch_size, use_gpu, vis):
+def test(model, dataloader, batch_size, use_gpu):
     """
     Perform testing on the model.
     """
@@ -526,7 +567,7 @@ def test(model, dataloader, batch_size, use_gpu, vis):
     confusion_matrix = torch.zeros(11,11)
 
 
-    with Bar('Final Testing:', max=len(dataloader), suffix ='%(index)d/%(max)d - %(eta)ds\r') as bar, torch.no_grad():
+    with Bar('  Final Testing:', max=len(dataloader), suffix ='%(index)d/%(max)d - %(eta)ds\r') as bar, torch.no_grad():
         for i, data in enumerate(dataloader):
 		
             iteration = i + 1
@@ -542,6 +583,7 @@ def test(model, dataloader, batch_size, use_gpu, vis):
                 #	x1 = Variable(x1.cuda())
                 y = Variable(y.cuda())
 
+
             # Forward pass.
             y_pred = model(x)#,x1)
             #preds = preds + y_pred.tolist()
@@ -556,13 +598,12 @@ def test(model, dataloader, batch_size, use_gpu, vis):
                 confusion_matrix[t.long(), p.long()] += 1
 
 
-
             bar.next()
 
             #print ("Top 1: ", topk[0].item())
 			
             if i + 1 == len(dataloader):
-                #vis.plot_test_acc(test_acc, 1)
+                #vis.plot_acc(test_acc,"test", 1)
                 print ("\n")
                 print ("Test Accuracy: %.1f %%" % np.mean(acc_values))
                 #EER = calc_eer(preds,labels)
@@ -588,8 +629,20 @@ def test(model, dataloader, batch_size, use_gpu, vis):
     print ("\n")
 
 
+def matplotlib_imshow(img, one_channel=False):
+    """
+    Helper function to show image
+    """
+    if one_channel:
+        img = img.mean(dim=0)
+    img = img / 2 + 0.5 #unnormalise
+    npimg = img.cpu().numpy()
+    if one_channel:
+        plt.imshow(npimg, cmap="Greys")
+    else:
+        plt.imshow(np.transpose(npimg, (1,2,0)))
 
-	
+
 class EarlyStopping:
 	
     """Early stops the training if validation loss doesn't improve after a given patience."""
