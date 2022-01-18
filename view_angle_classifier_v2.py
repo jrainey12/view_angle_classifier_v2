@@ -5,12 +5,12 @@ import torch.nn.functional as F
 from torchvision import datasets, models, transforms
 from torch.autograd import Variable
 import torch.optim as optim
-from os.path import join, isfile
+from os.path import join, isfile, exists
+import os
 import logging
 import argparse
 import csv
 import datetime
-import visdom
 import numpy as np
 from PIL import Image
 from progress.bar import Bar
@@ -21,10 +21,8 @@ import matplotlib.pyplot as plt
 
 _LOGGER = logging.getLogger(__name__)
 
-# N is batch size; D_in is input dimension;
-# H is hidden dimension; D_out is output dimension.
 
-def main(data_dir, learning_rate, batch_size, epochs, mode):
+def main(data_dir, learning_rate, batch_size, epochs, mode, name):
     """
     Train and test CNN for classifying view angles from 3D poses and silhouettes.
     param: data_dir - input data directory
@@ -32,6 +30,7 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
     param: batch_size - size of batch to use
     param: epochs - number of epochs to train for
     param: mode - train, test or resume.
+    param: name - name of the run.
     """
     _LOGGER.info("Learning Rate: %.10f", learning_rate)
     _LOGGER.info("Batch Size: %d", batch_size)
@@ -43,8 +42,12 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
 	
     test_data = join(data_dir, "test/")
 
-    #CUDA timer
+    model_dir = join("models", name)
+    
+    if not exists(model_dir):
+        os.makedirs(model_dir)
 
+    #CUDA timer
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
 	
@@ -62,9 +65,9 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
     #mean,std = [0.14080575],[0.3444886]#100k dataset
     mean,std = [0.14054182],[0.3442364]#128k dataset
 
+    writer = SummaryWriter('runs/' + name)
+
     if mode == 'train':
-	
-        writer = SummaryWriter('runs/occluded_1')
 		
         print ("Mean :", mean)
         print ("Std :", std)
@@ -75,29 +78,22 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
         _LOGGER.info("Train batches: %d",  len(train_dataloader))
     #	_LOGGER.info("Gallery train batches: %d", len(train_gal_dataloader))
 
-        #train_label_data = read_label_file(train_labels)
-        #val_label_data = read_label_file(val_labels)
 		
         _LOGGER.info("Val batches: %d",  len(val_dataloader))
 	#	_LOGGER.info("Gallery val batches: %d", len(val_gal_dataloader))
 		
-	#	_LOGGER.info("Train label file length: %d" ,len(train_label_data))
-	#	_LOGGER.info("Val label file length: %d" ,len(val_label_data))
 
-		#return
         _LOGGER.info("Starting Training... ")
-		
-	#optimizer = optim.Adam(model.parameters(), lr=learning_rate)#, momentum=0.9)#,
+	
+        #SGD optimiser, momentum=0.9, weight_decay=0.0005
         optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, 
                 weight_decay=0.0005)
 		
-        #vis = Visualizations()
 		
+        #Initialise early stopping
         early_stopping = EarlyStopping(5)
         total_time_ms = 0.0
 		
-        #_, _ = validate(model, val_dataloader, batch_size, 0, use_gpu, vis,early_stopping)
-
 
         for epoch in range(epochs):
 		
@@ -117,64 +113,64 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
                     param_group['lr'] = learning_rate
 			
 			
-            t_loss, t_acc = train(model, optimizer, train_dataloader, epoch+1, batch_size, use_gpu)#, writer)#,vis)		
+            #TRAIN
+            t_loss, t_acc = train(model, optimizer, train_dataloader, epoch+1, batch_size, use_gpu)#, writer)		
             
+            # Write train loss to tensorboard
             writer.add_scalar('training loss',
                             np.mean(t_loss),
                             epoch)
 
+            # Write train accuracy to tensorboard
             writer.add_scalar('training acc',
                     np.mean(t_acc),
                     epoch)
 
-            #vis.plot_loss(np.mean(t_loss), "train", epoch+1)
-            #vis.plot_acc(np.mean(t_acc), "train", epoch+1)
 
+            # Save every 5th epoch
             if (epoch+1) > 0 and (epoch+1) % 5 == 0:
 				
                 torch.save({
                 'epoch': epoch + 1,
                 'state_dict': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                }, "models/model_"+ str(epoch+1)+ ".pth")
+                }, model_dir + "/model_"+ str(epoch+1)+ ".pth")
 
                 _LOGGER.info("Saving Model.")
 
 
             _LOGGER.info("Performing Validation... ")
 			
-            v_loss, v_acc = validate(model, val_dataloader, batch_size, epoch+1, use_gpu,early_stopping, optimizer)#vis)
-	    
+            #VALIDATION TESTING
+            v_loss, v_acc = validate(model, val_dataloader, batch_size, epoch+1, use_gpu,early_stopping, optimizer)
+	        #Write validation loss to tensorboard
             writer.add_scalar('val loss',
                             np.mean(v_loss),
                             epoch)
+
+            #Write validation accuracy to tensorboard
             writer.add_scalar('val acc',
                     np.mean(v_acc),
                     epoch)
-
-
-
-            #vis.plot_loss(np.mean(v_loss), "val", epoch+1)
-            #vis.plot_acc(np.mean(v_acc), "val", epoch+1)
 
 
             if early_stopping.early_stop:
                 print("Early stopping.")
                 break
 
+            
+            # Calc time taken
             end.record()
-
             torch.cuda.synchronize()
-
             time_ms = start.elapsed_time(end)
             epoch_time = datetime.timedelta(milliseconds=time_ms)
-			
             _LOGGER.info("Epoch Elapsed Time: %s" % str(epoch_time))
 
             total_time_ms = total_time_ms + time_ms
             total_time = datetime.timedelta(milliseconds=total_time_ms)
             _LOGGER.info("Total Elapsed Time: %s" % str(total_time))
 			
+            # Calc time remaining
             epoch_remain = (epochs - (epoch + 1))
             _LOGGER.info("Epochs remaining: %d " % epoch_remain)
             est_time_remain_ms = epoch_remain * (total_time_ms/(epoch+1))
@@ -182,7 +178,8 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
             _LOGGER.info("Estimated Time Remaining: %s" % str(est_time_remain) + "\n")
 
         _LOGGER.info("Training Complete.")
-			
+		
+        # Save final model
         torch.save({
         'epoch': epoch + 1,
         'state_dict': model.state_dict(),
@@ -202,10 +199,8 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
         model.load_state_dict(torch.load("model.pth")['state_dict'])
         test_dataloader = load_data(test_data, batch_size, mean, std)
 				
-        #vis = Visualizations()
-		
         
-        writer = SummaryWriter('runs/occluded_1')
+        #writer = SummaryWriter("runs/" + name)
 
         #get some random images
         dataiter = iter(test_dataloader)
@@ -224,6 +219,7 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
         writer.add_graph(net, images)
         writer.close()
 
+        # TEST
         test(model, test_dataloader, batch_size, use_gpu)
 		
     elif mode == 'resume':
@@ -246,20 +242,18 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
         start_epoch = model_data['epoch']
 
         _LOGGER.info("Resuming Training from epoch %d" % start_epoch)
-		
+	
+        #SGD optimizer 
         optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9,
                 weight_decay=0.0005)
         
         optimizer.load_state_dict(model_data['optimizer'])
-
-        vis = Visualizations()
-		
-        early_stopping = EarlyStopping(15)
+	
+        early_stopping = EarlyStopping(5)
 		
         total_time_ms = 0.0
         
         es_epoch = start_epoch + epochs
-        #validate(model, val_dataloader, batch_size, 0, use_gpu, vis,early_stopping)
 
         for epoch in range(start_epoch, start_epoch + epochs):
 			
@@ -275,45 +269,61 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
                 learning_rate = learning_rate/10
                 for param_group in optimizer.param_groups:
                         param_group['lr'] = learning_rate
-					
-            t_loss, t_acc = train(model, optimizer, train_dataloader, epoch, batch_size, use_gpu, vis)
+			
+            #TRANING
+            t_loss, t_acc = train(model, optimizer, train_dataloader, epoch, batch_size, use_gpu)
 
-            vis.plot_loss(np.mean(t_loss), "train", epoch+1)
-            vis.plot_acc(np.mean(t_acc), "train", epoch+1)
+            #Write train loss to tensorboard
+            writer.add_scalar('training loss',
+                            np.mean(t_loss),
+                            epoch)
+            
+            #Write train accuracy to tensorboard
+            writer.add_scalar('training acc',
+                    np.mean(t_acc),
+                    epoch)
 
+            #Save every 5th epoch
             if (epoch+1) % 5 == 0:
 				
                 torch.save({
                 'epoch': epoch + 1,
                 'state_dict': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                }, "models/model_"+ str(epoch+1)+ ".pth")
+                }, model_dir + "model_"+ str(epoch+1)+ ".pth")
             _LOGGER.info("Performing Validation... ")
 
-            v_loss, v_acc = validate(model, val_dataloader, batch_size, epoch+1, use_gpu, vis,early_stopping, optimizer)
-	
+            #VALIDATION TESTING
+            v_loss, v_acc = validate(model, val_dataloader, batch_size, epoch+1, use_gpu,early_stopping, optimizer)
+            #Write validation loss to tensorboard
+            writer.add_scalar('val loss',
+                            np.mean(v_loss),
+                            epoch)
 
-            vis.plot_loss(np.mean(v_loss), "val", epoch+1)
-            vis.plot_acc(np.mean(v_acc), "val", epoch+1)
+            #Write validation accuracy to tensorboard
+            writer.add_scalar('val acc',
+                    np.mean(v_acc),
+                    epoch)
+
+
 
             if early_stopping.early_stop:
                 print("Early stopping.")
                 es_epoch = (epoch+1)
                 break
 		
+            #Calc time taken
             end.record()
-
             torch.cuda.synchronize()
-
             time_ms = start.elapsed_time(end)
             epoch_time = datetime.timedelta(milliseconds=time_ms)
-			
             _LOGGER.info("Epoch Elapsed Time: %s" % str(epoch_time))
 
             total_time_ms = total_time_ms + time_ms
             total_time = datetime.timedelta(milliseconds=total_time_ms)
             _LOGGER.info("Total Elapsed Time: %s" % str(total_time))
 			
+            #Calc time remaining
             epoch_remain = (epochs - (epoch + 1 - start_epoch))
             _LOGGER.info("Epochs remaining: %d " % epoch_remain)
             est_time_remain_ms = epoch_remain * (total_time_ms/(epoch+1-start_epoch))
@@ -322,6 +332,7 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
 
         _LOGGER.info("Training Complete.")
 			
+        #Save final model
         torch.save({
         'epoch': es_epoch,
         'state_dict': model.state_dict(),
@@ -331,14 +342,15 @@ def main(data_dir, learning_rate, batch_size, epochs, mode):
         _LOGGER.info("Model Saved.")
 
         _LOGGER.info("Total Elapsed Time: %s" % str(total_time))
-		
+
+
+
 def load_data(data_dir, batch_size, mean, std):
     """
     Load the probe and gallery data and perform data transforms on data.
     Return: pro_dataloader, gal_dataloader, pro_sizes, gal_sizes 
     """
 	
-
     #Data transformations
     data_transforms = transforms.Compose([
 			
@@ -381,13 +393,12 @@ def calc_acc(y_pred, y, total):
     return acc, n_correct
 
 
-def train(model, optimizer, dataloader, epoch, batch_size, use_gpu,):#vis):
+def train(model, optimizer, dataloader, epoch, batch_size, use_gpu,):
     """
     Perform the training of the network.
     Return: loss_vals, acc_vals.
     """
-	
-	
+		
     model.train()
 	
     loss_values = []	
@@ -432,34 +443,21 @@ def train(model, optimizer, dataloader, epoch, batch_size, use_gpu,):#vis):
 
             # Backward pass.
             loss.backward()
-#		clip=5 	
-#		torch.nn.utils.clip_grad_norm_(model.parameters(),clip)
 		
             optimizer.step()
             train_acc, correct = calc_acc(y_pred,y,batch_size)	
-            #train_acc, correct = calc_acc(torch.sigmoid(y_pred),y,batch_size)
             acc_values.append(train_acc)
-		#print(train_acc)
-			#if iteration % 10 == 0:
-				#vis.plot_train_loss(np.mean(loss_values), iteration)
 				
-			
-				#vis.plot_train_acc(np.mean(acc_values), iteration)		
 			
             bar.next()
 	    
 	
             if i+1 == len(dataloader):
 
-                #vis.plot_train_loss(np.mean(loss_values), epoch)
-                #vis.plot_train_acc(np.mean(acc_values), epoch)
                 print ("\n")
                 _LOGGER.info("Train Loss: %.5f" % np.mean(loss_values))
                 _LOGGER.info("Train Accuracy: %.1f %%" % np.mean(acc_values))
 			
-			
-                #loss_values.clear()
-                #acc_values.clear()
 
     bar.finish()		
 
@@ -470,7 +468,6 @@ def validate(model, dataloader, batch_size, epoch,use_gpu, early_stopping, optim
     Perform validation tests on the model.
     Return: loss_vals, acc_vals
     """
-    #loss_fn = torch.nn.MSELoss()
     loss_fn = torch.nn.CrossEntropyLoss()
     #loss_fn = torch.nn.BCEWithLogitsLoss()
 
@@ -480,7 +477,6 @@ def validate(model, dataloader, batch_size, epoch,use_gpu, early_stopping, optim
     acc_values = []
     val_loss = 0
 
-    #confusion_matrix = torch.zeros(11,11)
 
     with Bar('  Validation Testing:', max=len(dataloader), suffix ='%(index)d/%(max)d - %(eta)ds\r') as bar, torch.no_grad():
         for i,data in enumerate(dataloader):
@@ -512,47 +508,28 @@ def validate(model, dataloader, batch_size, epoch,use_gpu, early_stopping, optim
             val_acc, correct = calc_acc(torch.softmax(y_pred,dim=1),y,batch_size)
             #val_acc, correct = calc_acc(torch.sigmoid(y_pred),y,batch_size)
             acc_values.append(val_acc)
-            #print ("Validation Correct: ", correct)    
-           # _,preds = torch.max(y_pred,1)
-           # for t, p in zip(y.view(-1),preds.view(-1)):
-           #     confusion_matrix[t.long(), p.long()] += 1
-
-            #if iteration % 100 == 0:
-			
-            #	vis.plot_val_loss(np.mean(loss_values), iteration)
-            #   early_stopping(np.mean(loss_values), model, epoch)
-				
-            #	vis.plot_val_acc(np.mean(acc_values), iteration)
 			
             bar.next()
             
 
             if i + 1 == len(dataloader):
 
-                #vis.plot_val_loss(np.mean(loss_values), epoch)
-                #vis.plot_val_acc(np.mean(acc_values), epoch)
                 print ("\n")
                 _LOGGER.info("Validation Loss: %.5f" % np.mean(loss_values))
                 _LOGGER.info("Validation Accuracy: %.1f %%" % np.mean(acc_values) + "\n")
 	        
                 early_stopping(np.mean(loss_values), model, optimizer, epoch)
 	
-                #loss_values.clear()
-                #acc_values.clear()
-    
-   # print (confusion_matrix)
-   # print (confusion_matrix.diag()/confusion_matrix.sum(1)*100)
-   # print ("\n")
 
     bar.finish()
 
     return loss_values,acc_values
-	  
+
+
 def test(model, dataloader, batch_size, use_gpu):
     """
     Perform testing on the model.
     """
-    #loss_fn = torch.nn.MSELoss()
     loss_fn = torch.nn.CrossEntropyLoss()
     #loss_fn = torch.nn.BCEWithLogitsLoss()
 
@@ -603,7 +580,6 @@ def test(model, dataloader, batch_size, use_gpu):
             #print ("Top 1: ", topk[0].item())
 			
             if i + 1 == len(dataloader):
-                #vis.plot_acc(test_acc,"test", 1)
                 print ("\n")
                 print ("Test Accuracy: %.1f %%" % np.mean(acc_values))
                 #EER = calc_eer(preds,labels)
@@ -741,47 +717,6 @@ class Net(nn.Module):
         return fc_1
 	
 
-class Visualizations:
-	
-    def __init__(self, env_name=None):
-        if env_name is None:
-            env_name = str(datetime.datetime.now().strftime("%d-%m %Hh%M"))
-        self.env_name = env_name
-        self.vis = visdom.Visdom(env=self.env_name)
-        self.loss_win = None	
-        self.acc_win = None
-
-
-    def plot_loss(self, loss, name, step):
-        self.loss_win = self.vis.line(
-            [loss],
-            [step],
-            win=self.loss_win,
-            name=name,
-            update='append' if self.loss_win else None,
-            opts=dict(
-                xlabel='Epoch',
-                ylabel='Loss',
-                title='Train and Validation Loss',
-            )
-	)
-
-
-    def plot_acc(self, acc, name, step):
-        self.acc_win = self.vis.line(
-            [acc],
-            [step],
-            win=self.acc_win,
-            name=name,
-            update='append' if self.acc_win else None,
-            opts=dict(
-                xlabel='Epoch',
-                ylabel='Accuracy',
-                title='Train and Validation Accuracy(%)',
-            )
-        )
-    
-
     
 		
 if __name__=='__main__':
@@ -817,7 +752,12 @@ if __name__=='__main__':
         default='train',
         choices=['train','test', 'resume'],
         help="Mode of operation, train or test. Default: train.")	   
-        
+     
+    parser.add_argument(
+        '--name',
+        default='temp_train',
+        help="Name of the folder to store trained models. Default: models/temp_train.")	   
+   
     args = parser.parse_args()
 
-    main(args.data_dir, args.learning_rate, args.batch_size, args.epochs, args.mode)
+    main(args.data_dir, args.learning_rate, args.batch_size, args.epochs, args.mode, args.name)
